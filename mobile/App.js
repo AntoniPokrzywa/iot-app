@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Platform, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { Animated, Platform, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator, Button, FAB, IconButton, PaperProvider, Surface, Text, TextInput, TouchableRipple,
 } from 'react-native-paper';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Circle } from 'react-native-svg';
 import { StatusBar } from 'expo-status-bar';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { Inter_400Regular, Inter_600SemiBold, Inter_700Bold, useFonts } from '@expo-google-fonts/inter';
@@ -23,69 +24,61 @@ function useNow(ms = 1000) {
 
 // ---- small pieces ----------------------------------------------------------
 
-/**
- * Countdown circle: full right after a health ping, then the "water" drains while the
- * colour goes green -> orange -> red. Shows the time left to the next expected ping.
- */
-function SignalGauge({ hive, now, size = 46 }) {
-  const sg = signalState(hive, now);
-  if (!sg) {
-    return (
-      <View style={[s.gauge, { width: size, height: size, borderRadius: size / 2, borderColor: C.line, backgroundColor: C.offBg }]}>
-        <Icon name="wifi-off" size={size * 0.42} color={C.off} />
-      </View>
-    );
-  }
-  const waterWeb = Platform.OS === 'web' ? { transitionProperty: 'height, background-color', transitionDuration: '1s', transitionTimingFunction: 'linear' } : null;
-  return (
-    <View style={[s.gauge, { width: size, height: size, borderRadius: size / 2, borderColor: sg.color, backgroundColor: C.surface }]}>
-      <View style={[s.water, { height: `${Math.round(sg.level * 100)}%`, backgroundColor: `${sg.color}59` }, waterWeb]} />
-      <Text style={[s.gaugeTxt, { fontSize: size * 0.27, color: sg.late ? C.alert : C.ink }]}>
-        {sg.late ? `+${fmtMS(sg.lateBy)}` : fmtMS(sg.remaining)}
-      </Text>
-    </View>
-  );
-}
-
-function PulseDot({ color }) {
-  const v = useRef(new Animated.Value(0)).current;
+/** Gently pulses its children (used for alarms). */
+function Pulse({ children, style }) {
+  const v = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     const native = Platform.OS !== 'web';
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(v, { toValue: 1, duration: 1000, easing: Easing.out(Easing.ease), useNativeDriver: native }),
-        Animated.timing(v, { toValue: 0, duration: 0, useNativeDriver: native }),
+        Animated.timing(v, { toValue: 0.35, duration: 700, useNativeDriver: native }),
+        Animated.timing(v, { toValue: 1, duration: 700, useNativeDriver: native }),
       ]),
     );
     loop.start();
     return () => loop.stop();
   }, [v]);
+  return <Animated.View style={[style, { opacity: v }]}>{children}</Animated.View>;
+}
+
+/**
+ * Ring around its children that shows the signal: full and green right after a health
+ * ping, draining and turning orange, then red until the next one is due. An alarm
+ * overrides it with a pulsing red ring.
+ */
+function SignalRing({ hive, now, size = 56, stroke = 4, alert = false, children }) {
+  const sg = signalState(hive, now);
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const level = alert ? 1 : sg ? sg.level : 0;
+  const color = alert ? C.alert : sg ? sg.color : C.line;
+  const ring = (
+    <Svg width={size} height={size} style={s.ringSvg}>
+      <Circle cx={size / 2} cy={size / 2} r={r} stroke={sg?.late ? C.alertLine : C.line} strokeWidth={stroke} fill="none" />
+      {level > 0.004 && (
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          fill="none"
+          strokeDasharray={`${c} ${c}`}
+          strokeDashoffset={c * (1 - level)}
+        />
+      )}
+    </Svg>
+  );
   return (
-    <View style={s.dotWrap}>
-      <Animated.View
-        style={[
-          s.dotRing,
-          {
-            backgroundColor: color,
-            opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] }),
-            transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [1, 2.8] }) }],
-          },
-        ]}
-      />
-      <View style={[s.dot, { backgroundColor: color }]} />
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {alert ? <Pulse style={StyleSheet.absoluteFill}>{ring}</Pulse> : ring}
+      {children}
     </View>
   );
 }
 
-function Pill({ status }) {
-  const st = STATUS[status];
-  return (
-    <View style={[s.pill, { backgroundColor: st.bg }]}>
-      {status === 'alert' ? <PulseDot color={st.fg} /> : <View style={[s.dot, { backgroundColor: st.fg }]} />}
-      <Text variant="labelMedium" numberOfLines={1} style={{ color: st.fg }}>{st.label}</Text>
-    </View>
-  );
-}
+const countdownText = (sg) => (sg.late ? `+${fmtMS(sg.lateBy)}` : fmtMS(sg.remaining));
 
 function Notice({ icon = 'alert-circle-outline', text, tone = 'alert', onRetry }) {
   const fg = tone === 'alert' ? C.alert : C.muted;
@@ -162,17 +155,44 @@ function Brand() {
   );
 }
 
+/** Alarm takes over the top of the screen. */
+function AlertHero({ alerts, onOpen }) {
+  const first = alerts[0];
+  const names = alerts.map((h) => h.name || h.id).join(', ');
+  return (
+    <View style={s.alertHero}>
+      <View style={s.alertHeroIcon}>
+        <Pulse style={s.alertHalo} />
+        <Icon name="alert" size={32} color="#fff" />
+      </View>
+      <Text variant="labelLarge" style={s.alertKicker}>ALARM</Text>
+      <Text variant="headlineMedium" style={s.alertTitle}>
+        {alerts.length === 1 ? 'Wykryto szerszenia' : `Wykryto szerszenie w ${alerts.length} ulach`}
+      </Text>
+      <Text variant="bodyLarge" style={s.alertSub}>
+        {names}{first.last ? ` · ${ago(first.last)}` : ''}
+      </Text>
+      <Button
+        mode="contained"
+        buttonColor="#fff"
+        textColor={C.alert}
+        style={[s.btn, { marginTop: 18, alignSelf: 'stretch' }]}
+        contentStyle={s.btnContent}
+        labelStyle={s.btnLabel}
+        onPress={() => onOpen(first.id)}
+      >
+        {alerts.length === 1 ? 'Zobacz ul' : `Zobacz: ${first.name || first.id}`}
+      </Button>
+    </View>
+  );
+}
+
 function Summary({ hives }) {
-  const alerts = hives.filter((h) => h.alert);
-  const offline = hives.filter((h) => !h.alert && !h.online);
+  const offline = hives.filter((h) => !h.online);
   let tone = 'safe';
   let title = 'Wszystkie ule są bezpieczne';
   let sub = `${hives.length} ${hives.length === 1 ? 'ul' : 'uli'} pod ochroną`;
-  if (alerts.length) {
-    tone = 'alert';
-    title = alerts.length === 1 ? 'Wykryto szerszenia!' : `Wykryto szerszenie w ${alerts.length} ulach!`;
-    sub = alerts.map((h) => h.name || h.id).join(', ');
-  } else if (offline.length) {
+  if (offline.length) {
     tone = 'offline';
     title = offline.length === hives.length ? 'Brak sygnału z uli' : 'Część uli bez sygnału';
     sub = offline.map((h) => h.name || h.id).join(', ');
@@ -195,22 +215,25 @@ function HiveCard({ hive, now, onPress }) {
   const status = statusOf(hive);
   const st = STATUS[status];
   const isAlert = status === 'alert';
+  const sg = signalState(hive, now);
   const seen = ago(hive.last_seen);
   return (
-    <Surface style={[s.card, isAlert && s.cardAlert]} elevation={isAlert ? 0 : 1}>
+    <Surface style={[s.card, isAlert && s.cardAlert]} elevation={0}>
       <TouchableRipple onPress={onPress} borderless style={s.cardTouch} rippleColor="rgba(0,0,0,0.06)">
         <View style={s.cardRow}>
-          <View style={[s.avatar, { backgroundColor: st.bg }]}>
+          <SignalRing hive={hive} now={now} size={56} alert={isAlert}>
             <Icon name={st.icon} size={24} color={st.fg} />
-          </View>
-          <View style={{ flex: 1, gap: 2 }}>
+          </SignalRing>
+          <View style={{ flex: 1, gap: 1 }}>
             <Text variant="titleMedium" numberOfLines={1}>{hive.name || hive.id}</Text>
-            <Text variant="bodySmall" style={s.muted} numberOfLines={1}>
-              {hive.id} · {seen ?? 'brak sygnału'}
-            </Text>
-            <View style={{ marginTop: 6 }}><Pill status={status} /></View>
+            <Text variant="labelLarge" style={{ color: st.fg }} numberOfLines={1}>{st.label}</Text>
+            <Text variant="bodySmall" style={s.muted} numberOfLines={1}>{hive.id} · {seen ?? 'brak sygnału'}</Text>
           </View>
-          <SignalGauge hive={hive} now={now} size={44} />
+          {sg && (
+            <Text variant="titleMedium" style={[s.countdown, { color: sg.late ? C.alert : sg.color }]}>
+              {countdownText(sg)}
+            </Text>
+          )}
         </View>
       </TouchableRipple>
     </Surface>
@@ -233,6 +256,7 @@ function Empty({ onAdd }) {
 function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
   const insets = useSafeAreaInsets();
   const now = useNow();
+  const alerts = (hives || []).filter((h) => h.alert);
   return (
     <View style={{ flex: 1 }}>
       <ScrollView
@@ -244,7 +268,7 @@ function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
         {hives === null && !error && <ActivityIndicator color={C.honeyDark} style={{ marginTop: 48 }} />}
         {hives && hives.length > 0 && (
           <>
-            <Summary hives={hives} />
+            {alerts.length > 0 ? <AlertHero alerts={alerts} onOpen={onOpen} /> : <Summary hives={hives} />}
             <Text variant="labelLarge" style={s.sectionLabel}>TWOJE ULE</Text>
             <View style={{ gap: 12 }}>
               {hives.map((h) => <HiveCard key={h.id} hive={h} now={now} onPress={() => onOpen(h.id)} />)}
@@ -283,7 +307,7 @@ function AddHive({ onSave, onCancel }) {
     <View style={{ flex: 1 }}>
       <TopBar title="Dodaj nowy ul" onBack={onCancel} />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <Surface style={s.panel} elevation={1}>
+        <Surface style={s.panel} elevation={0}>
           <Input label="ID ula" placeholder="np. VG-0158" hint="Znajdziesz je na naklejce urządzenia." value={f.id} onChangeText={set('id')} autoCapitalize="characters" />
           <Input label="Nazwa (opcjonalnie)" placeholder="np. Ul przy sadzie" hint="Będzie widoczna na liście uli." value={f.name} onChangeText={set('name')} style={{ marginTop: 16 }} />
           <Text variant="labelLarge" style={[s.sectionLabel, { marginTop: 20 }]}>WSPÓŁRZĘDNE</Text>
@@ -302,11 +326,13 @@ function AddHive({ onSave, onCancel }) {
 
 function Stat({ icon, label, value, note }) {
   return (
-    <Surface style={s.stat} elevation={1}>
+    <View style={s.stat}>
       <Icon name={icon} size={22} color={C.honeyDark} />
-      <Text variant="titleMedium" style={{ marginTop: 6 }}>{value}</Text>
-      <Text variant="bodySmall" style={s.muted}>{note ? `${label} · ${note}` : label}</Text>
-    </Surface>
+      <View>
+        <Text variant="titleMedium">{value}</Text>
+        <Text variant="bodySmall" style={s.muted}>{note ? `${label} · ${note}` : label}</Text>
+      </View>
+    </View>
   );
 }
 
@@ -354,6 +380,7 @@ function Details({ hive, onSave, onBack }) {
   const now = useNow();
   const status = statusOf(hive);
   const st = STATUS[status];
+  const isAlert = status === 'alert';
   const seen = ago(hive.last_seen);
   const sg = signalState(hive, now);
 
@@ -361,38 +388,33 @@ function Details({ hive, onSave, onBack }) {
     <View style={{ flex: 1 }}>
       <TopBar title={hive.name || hive.id} subtitle={`ID: ${hive.id}`} onBack={onBack} />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <View style={[s.hero, { backgroundColor: st.bg }, status === 'alert' && { borderColor: C.alertLine, borderWidth: 1 }]}>
-          <View style={[s.heroIcon, { backgroundColor: st.fg }]}>
-            <Icon name={st.icon} size={28} color="#fff" />
-          </View>
-          <View style={{ flex: 1 }}>
+        <View style={[s.hero, { backgroundColor: st.bg }, isAlert && { borderColor: C.alertLine, borderWidth: 1 }]}>
+          <SignalRing hive={hive} now={now} size={92} stroke={7} alert={isAlert}>
+            {sg ? (
+              <Text variant="titleLarge" style={[s.heroCountdown, { color: sg.late ? C.alert : C.ink }]}>{countdownText(sg)}</Text>
+            ) : (
+              <Icon name={st.icon} size={32} color={st.fg} />
+            )}
+          </SignalRing>
+          <View style={{ flex: 1, gap: 2 }}>
             <Text variant="titleLarge" style={{ color: st.fg }}>{st.label}</Text>
-            <Text variant="bodySmall" style={{ color: st.fg, opacity: 0.85 }}>
-              {seen ? `Ostatni sygnał: ${seen}` : 'Ten ul nie wysłał jeszcze żadnych danych'}
+            <Text variant="bodyMedium" style={{ color: C.ink }}>
+              {!sg
+                ? (seen ? `Ostatni sygnał: ${seen}` : 'Czekamy na pierwszy sygnał')
+                : sg.late ? `Spóźniony o ${fmtMS(sg.lateBy)}` : `Healthcheck za ${fmtMS(sg.remaining)}`}
             </Text>
+            {sg && <Text variant="bodySmall" style={s.muted}>Ostatni: {seen} · co {Math.round(sg.interval / 60)} min</Text>}
           </View>
         </View>
 
-        <Surface style={s.timer} elevation={1}>
-          <SignalGauge hive={hive} now={now} size={76} />
-          <View style={{ flex: 1 }}>
-            <Text variant="labelLarge" style={s.muted}>HEALTHCHECK</Text>
-            <Text variant="titleMedium" style={{ color: sg ? (sg.late ? C.alert : C.ink) : C.muted }}>
-              {!sg ? 'Brak sygnału' : sg.late ? `Spóźniony o ${fmtMS(sg.lateBy)}` : `Następny za ${fmtMS(sg.remaining)}`}
-            </Text>
-            <Text variant="bodySmall" style={s.muted}>
-              {sg ? `Ostatni: ${seen} · co ${Math.round(sg.interval / 60)} min` : seen ? `Ostatni sygnał: ${seen}` : 'Czekamy na pierwszy sygnał'}
-            </Text>
-          </View>
+        <Surface style={s.statsPanel} elevation={0}>
+          <Stat icon={batteryIcon(hive.battery)} label="Bateria" value={hive.battery == null ? '—' : `${hive.battery}%`} />
+          <View style={s.statDivider} />
+          <Stat icon="signal" label="Zasięg" value={hive.rssi == null ? '—' : `${hive.rssi} dBm`} note={rssiQuality(hive.rssi)} />
         </Surface>
 
-        <View style={s.statRow}>
-          <Stat icon={batteryIcon(hive.battery)} label="Bateria" value={hive.battery == null ? '—' : `${hive.battery}%`} />
-          <Stat icon="signal" label="Zasięg" value={hive.rssi == null ? '—' : `${hive.rssi} dBm`} note={rssiQuality(hive.rssi)} />
-        </View>
-
         <Text variant="labelLarge" style={s.sectionLabel}>DANE ULA</Text>
-        <Surface style={s.panel} elevation={1}>
+        <Surface style={s.panel} elevation={0}>
           <View style={{ flexDirection: 'row', gap: 12 }}>
             <Input label="ID ula" value={f.id} onChangeText={set('id')} autoCapitalize="characters" />
             <Input label="Nazwa" value={f.name} onChangeText={set('name')} />
@@ -409,7 +431,7 @@ function Details({ hive, onSave, onBack }) {
         {logs === null && !err && <ActivityIndicator color={C.honeyDark} style={{ marginTop: 12 }} />}
         {logs && logs.length === 0 && <Notice tone="muted" icon="history" text="Brak zdarzeń z tego ula." />}
         {logs && logs.length > 0 && (
-          <Surface style={s.logPanel} elevation={1}>
+          <Surface style={s.logPanel} elevation={0}>
             {logs.map((l, i) => <LogRow key={`${l.ts}-${i}`} log={l} last={i === logs.length - 1} />)}
           </Surface>
         )}
@@ -505,12 +527,14 @@ export default function App() {
 
 // ---- styles ----------------------------------------------------------------
 
+const box = { borderWidth: 1, borderColor: C.line, backgroundColor: C.surface };
+
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   container: { flex: 1, width: '100%', maxWidth: 560, alignSelf: 'center' },
   scroll: { padding: 20, paddingTop: 12, paddingBottom: 120 },
   muted: { color: C.muted },
-  sectionLabel: { color: C.muted, letterSpacing: 0.8, marginTop: 24, marginBottom: 10, fontSize: 12 },
+  sectionLabel: { color: C.muted, letterSpacing: 0.8, marginTop: 28, marginBottom: 10, fontSize: 12 },
 
   brand: { flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 8, marginBottom: 20 },
   logo: { width: 48, height: 48, borderRadius: 14, backgroundColor: C.honey, alignItems: 'center', justifyContent: 'center' },
@@ -518,16 +542,19 @@ const s = StyleSheet.create({
   summary: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 18 },
   summaryIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
 
-  card: { borderRadius: 18, backgroundColor: C.surface },
-  cardAlert: { backgroundColor: '#FFF5F6', borderWidth: 1, borderColor: C.alertLine },
-  cardTouch: { borderRadius: 18 },
-  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16 },
-  avatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  alertHero: { backgroundColor: C.alert, borderRadius: 24, padding: 22 },
+  alertHeroIcon: { width: 56, height: 56, alignItems: 'center', justifyContent: 'center' },
+  alertHalo: { position: 'absolute', width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,255,255,0.3)' },
+  alertKicker: { color: 'rgba(255,255,255,0.8)', letterSpacing: 1.5, marginTop: 16, fontSize: 12 },
+  alertTitle: { color: '#fff', marginTop: 2 },
+  alertSub: { color: 'rgba(255,255,255,0.9)', marginTop: 6 },
 
-  pill: { flexDirection: 'row', alignItems: 'center', gap: 7, alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  dotWrap: { width: 8, height: 8, alignItems: 'center', justifyContent: 'center' },
-  dotRing: { position: 'absolute', width: 8, height: 8, borderRadius: 4 },
+  card: { ...box, borderRadius: 20 },
+  cardAlert: { backgroundColor: '#FFF5F6', borderColor: C.alertLine },
+  cardTouch: { borderRadius: 20 },
+  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16 },
+  ringSvg: { position: 'absolute', transform: [{ rotate: '-90deg' }] },
+  countdown: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
 
   fab: { position: 'absolute', right: 20, borderRadius: 18 },
 
@@ -538,7 +565,7 @@ const s = StyleSheet.create({
 
   topBar: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 },
 
-  panel: { borderRadius: 18, padding: 16, backgroundColor: C.surface },
+  panel: { ...box, borderRadius: 20, padding: 16 },
   input: { backgroundColor: C.surface, fontSize: 15 },
   hint: { color: C.muted, marginTop: 4, marginLeft: 4 },
 
@@ -546,16 +573,13 @@ const s = StyleSheet.create({
   btnContent: { height: 50 },
   btnLabel: { fontFamily: 'Inter_600SemiBold', fontSize: 15, letterSpacing: 0 },
 
-  hero: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, borderRadius: 20 },
-  heroIcon: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
-  statRow: { flexDirection: 'row', gap: 12, marginTop: 12 },
-  timer: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 12, padding: 16, borderRadius: 18, backgroundColor: C.surface },
-  gauge: { borderWidth: 3, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
-  water: { position: 'absolute', left: 0, right: 0, bottom: 0 },
-  gaugeTxt: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
-  stat: { flex: 1, borderRadius: 18, padding: 16, backgroundColor: C.surface },
+  hero: { flexDirection: 'row', alignItems: 'center', gap: 18, padding: 18, borderRadius: 22 },
+  heroCountdown: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
+  statsPanel: { ...box, flexDirection: 'row', alignItems: 'center', borderRadius: 20, marginTop: 12, paddingVertical: 14 },
+  stat: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16 },
+  statDivider: { width: 1, alignSelf: 'stretch', backgroundColor: C.line },
 
-  logPanel: { borderRadius: 18, backgroundColor: C.surface, overflow: 'hidden' },
+  logPanel: { ...box, borderRadius: 20, overflow: 'hidden' },
   logRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12 },
   logDivider: { borderBottomWidth: 1, borderBottomColor: C.line },
   logIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },

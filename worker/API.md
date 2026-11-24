@@ -1,8 +1,10 @@
 # VespaGuard backend API — for hive nodes
 
+Runs on Cloudflare Workers + D1 (always on, data is persistent).
+
 Hive nodes (IoT devices) report to this backend over plain HTTPS + JSON.
 
-- **Base URL:** `https://iot-backend-f1iw.onrender.com`
+- **Base URL:** `https://vespaguard-api.vespa-guard.workers.dev`
 - **Auth:** none (yet). Do not hardcode anything secret; there is nothing to send.
 - **Content type:** send `Content-Type: application/json` on every request with a body.
 - **Timestamps:** the server sets them (UTC). Nodes must NOT send timestamps and need no clock.
@@ -27,7 +29,7 @@ Heartbeats do NOT appear in the detection log; events do.
 `id` is required; `name`, `lat`, `lng` are optional strings.
 
 ```bash
-curl -X POST https://iot-backend-f1iw.onrender.com/api/hives \
+curl -X POST https://vespaguard-api.vespa-guard.workers.dev/api/hives \
   -H "Content-Type: application/json" \
   -d '{"id":"VG-0157","name":"Ul na łące","lat":"50.0647","lng":"19.9450"}'
 ```
@@ -42,10 +44,10 @@ Body is optional. `battery` = integer 0–100 (%), `rssi` = integer dBm (e.g. `-
 
 ```bash
 # minimal: "I'm alive"
-curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/health
+curl -X POST https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/health
 
 # with battery and signal strength
-curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/health \
+curl -X POST https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/health \
   -H "Content-Type: application/json" \
   -d '{"battery":87,"rssi":-71}'
 ```
@@ -60,12 +62,12 @@ curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/health \
 
 ```bash
 # hornet detected
-curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/events \
+curl -X POST https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/events \
   -H "Content-Type: application/json" \
   -d '{"alert":true}'
 
 # all clear
-curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/events \
+curl -X POST https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/events \
   -H "Content-Type: application/json" \
   -d '{"alert":false}'
 ```
@@ -73,15 +75,16 @@ curl -X POST https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/events \
 - `201` → `{"alert":true,"ts":"2026-11-24T13:32:02Z"}`
 - `404` → hive not registered. `400` → `alert` missing or not a boolean.
 
-The hive's current status in the app is its **latest** event (`true` = red "Wykryto szerszenia", `false` = green "Ul bezpieczny").
+The hive's status in the app is its **latest** event (`true` = red "Wykryto szerszenia", `false` = green "Ul bezpieczny").
+**An alert turns off by itself 5 minutes after the last `alert:true`.** While a hornet is present, keep re-sending `alert:true` (e.g. every 15–60 s) to keep the alarm on. Sending `alert:false` clears it immediately. Heartbeats never change the alert status.
 
 ### 4. Read back (for testing/debugging)
 
 ```bash
-curl https://iot-backend-f1iw.onrender.com/api/hives                 # all hives + status
-curl https://iot-backend-f1iw.onrender.com/api/hives/VG-0157         # one hive
-curl "https://iot-backend-f1iw.onrender.com/api/hives/VG-0157/logs?limit=20"   # newest first
-curl https://iot-backend-f1iw.onrender.com/                          # backend health: {"status":"ok"}
+curl https://vespaguard-api.vespa-guard.workers.dev/api/hives                 # all hives + status
+curl https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157         # one hive
+curl "https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/logs?limit=20"   # newest first
+curl https://vespaguard-api.vespa-guard.workers.dev/                          # backend health: {"status":"ok"}
 ```
 
 Hive fields: `alert` (latest event), `last` (time of latest event), `last_seen` (latest event OR heartbeat), `online` (last_seen within 30 min), `battery`, `rssi`.
@@ -100,11 +103,11 @@ All errors are JSON: `{"error":"<message in Polish>"}`. Success is always `2xx` 
 
 ## Reliability rules (important)
 
-1. **Cold start:** the backend runs on a free tier and sleeps after ~15 min idle. The first request after a quiet period can take **30–60 seconds**. Use a request timeout of **at least 60 s** and do not treat a slow first request as failure. Regular heartbeats keep it awake.
-2. **Retry with backoff** on timeouts / `5xx` / network errors (e.g. 5 s, 15 s, 60 s, then wait for the next cycle). **Alert events (`alert:true`) are the priority:** keep retrying them (and queue them if offline) until `201`.
-3. **Resets:** storage is currently SQLite on an ephemeral disk, so the backend can lose all hives when it restarts or redeploys. If any call returns `404`, re-register with `POST /api/hives` (reuse the same `id`, `name`, `lat`, `lng`) and retry the original request. Registration is idempotent (`409` = fine).
-4. **TLS:** use HTTPS. Certificates are standard (Cloudflare/Let's Encrypt style public CAs), so the node needs a normal root CA bundle.
-5. **Do not send timestamps**, and do not send events faster than needed. Send one `alert:true` on detection (repeat every ~1 minute while the hornet is still present is fine), not one per sensor sample.
+1. **No cold starts:** the API is always on and answers in well under a second. A request timeout of 10–30 s is plenty.
+2. **Retry with backoff** on timeouts / `5xx` / network errors (e.g. 5 s, 15 s, 60 s). **Alert events (`alert:true`) are the priority:** queue and retry until `201`.
+3. **Data is persistent** (Cloudflare D1). Still, if any call returns `404`, re-register (`POST /api/hives`, same id/name/lat/lng) and retry the original request. Registration is idempotent (`409` = fine).
+4. Use HTTPS with a normal root CA bundle.
+5. Don't send timestamps. While a hornet is present, repeat `alert:true` every 15–60 s (the alarm expires 5 min after the last one); don't send one per sensor sample.
 
 ## Suggested node loop (pseudocode)
 
@@ -125,7 +128,7 @@ on detection ended:
 ## Quick smoke test (copy/paste)
 
 ```bash
-B=https://iot-backend-f1iw.onrender.com; H='Content-Type: application/json'
+B=https://vespaguard-api.vespa-guard.workers.dev; H='Content-Type: application/json'
 curl -m 90 -X POST $B/api/hives -H "$H" -d '{"id":"SMOKE-1","name":"smoke test"}'
 curl -m 90 -X POST $B/api/hives/SMOKE-1/health -H "$H" -d '{"battery":90,"rssi":-65}'
 curl -m 90 -X POST $B/api/hives/SMOKE-1/events -H "$H" -d '{"alert":true}'

@@ -1,0 +1,21 @@
+CREATE TABLE hives (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    lat TEXT NOT NULL DEFAULT '',
+    lng TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hive_id TEXT NOT NULL REFERENCES hives(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    alert INTEGER NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX idx_events_hive_ts ON events (hive_id, ts DESC);
+
+CREATE TABLE health (
+    hive_id TEXT PRIMARY KEY REFERENCES hives(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    ts TEXT NOT NULL,
+    battery INTEGER,
+    rssi INTEGER
+);

@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vespaguard-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-23",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vespaguard-db",
+      "database_id": "2fa1f213-972a-4149-89ac-360b27dbfaa4",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // An alert turns off by itself when no new alert event arrived for this long (0 = never).
+    "ALERT_TTL_MINUTES": "5",
+    // A hive is "offline" when neither an event nor a health ping arrived for this long.
+    "OFFLINE_AFTER_MINUTES": "30"
+  }
+}

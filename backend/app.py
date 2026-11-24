@@ -1,11 +1,15 @@
 import os
-import sqlite3
-from datetime import datetime, timezone
+from datetime import timezone
 
+import psycopg
 from flask import Flask, abort, g, jsonify, request
 from flask_cors import CORS
+from psycopg.errors import UniqueViolation
+from psycopg.rows import dict_row
 
-DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "vespaguard.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set (Postgres connection string, e.g. from Neon)")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hives (
@@ -15,10 +19,10 @@ CREATE TABLE IF NOT EXISTS hives (
     lng TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    hive_id TEXT NOT NULL REFERENCES hives(id) ON DELETE CASCADE,
-    alert INTEGER NOT NULL,
-    ts TEXT NOT NULL
+    id BIGSERIAL PRIMARY KEY,
+    hive_id TEXT NOT NULL REFERENCES hives(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    alert BOOLEAN NOT NULL,
+    ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_events_hive_ts ON events (hive_id, ts DESC);
 """
@@ -29,9 +33,7 @@ CORS(app)
 
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     return g.db
 
 
@@ -43,17 +45,26 @@ def close_db(_exc):
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript(SCHEMA)
+    with psycopg.connect(DATABASE_URL) as conn:
+        # Several gunicorn workers may boot at once; serialise schema creation.
+        conn.execute("SELECT pg_advisory_xact_lock(727401)")
+        conn.execute(SCHEMA)
 
 
 init_db()
 
 
+def iso(ts):
+    """TIMESTAMPTZ -> ISO-8601 UTC string, e.g. 2026-11-24T13:00:32Z."""
+    if ts is None:
+        return None
+    return ts.astimezone(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + "Z"
+
+
 def hive_json(row):
     """Hive plus its latest status. `last` is an ISO timestamp (UTC) or None."""
     latest = db().execute(
-        "SELECT alert, ts FROM events WHERE hive_id = ? ORDER BY ts DESC, id DESC LIMIT 1",
+        "SELECT alert, ts FROM events WHERE hive_id = %s ORDER BY ts DESC, id DESC LIMIT 1",
         (row["id"],),
     ).fetchone()
     return {
@@ -61,13 +72,13 @@ def hive_json(row):
         "name": row["name"],
         "lat": row["lat"],
         "lng": row["lng"],
-        "alert": bool(latest["alert"]) if latest else False,
-        "last": latest["ts"] if latest else None,
+        "alert": latest["alert"] if latest else False,
+        "last": iso(latest["ts"]) if latest else None,
     }
 
 
 def get_hive_or_404(hive_id):
-    row = db().execute("SELECT * FROM hives WHERE id = ?", (hive_id,)).fetchone()
+    row = db().execute("SELECT * FROM hives WHERE id = %s", (hive_id,)).fetchone()
     if row is None:
         abort(404, description="Nie znaleziono ula")
     return row
@@ -87,12 +98,13 @@ def http_error(e):
 
 @app.get("/")
 def health():
+    db().execute("SELECT 1")
     return jsonify(status="ok")
 
 
 @app.get("/api/hives")
 def list_hives():
-    rows = db().execute("SELECT * FROM hives ORDER BY rowid").fetchall()
+    rows = db().execute("SELECT * FROM hives ORDER BY id").fetchall()
     return jsonify([hive_json(r) for r in rows])
 
 
@@ -102,13 +114,14 @@ def create_hive():
     hive_id = clean(data, "id")
     if not hive_id:
         abort(400, description="ID ula jest wymagane")
-    if db().execute("SELECT 1 FROM hives WHERE id = ?", (hive_id,)).fetchone():
+    try:
+        db().execute(
+            "INSERT INTO hives (id, name, lat, lng) VALUES (%s, %s, %s, %s)",
+            (hive_id, clean(data, "name"), clean(data, "lat"), clean(data, "lng")),
+        )
+        db().commit()
+    except UniqueViolation:
         abort(409, description="Ul o takim ID już istnieje")
-    db().execute(
-        "INSERT INTO hives (id, name, lat, lng) VALUES (?, ?, ?, ?)",
-        (hive_id, clean(data, "name"), clean(data, "lat"), clean(data, "lng")),
-    )
-    db().commit()
     return jsonify(hive_json(get_hive_or_404(hive_id))), 201
 
 
@@ -122,22 +135,22 @@ def update_hive(hive_id):
     get_hive_or_404(hive_id)
     data = request.get_json(silent=True) or {}
     new_id = clean(data, "id") or hive_id
-    if new_id != hive_id and db().execute("SELECT 1 FROM hives WHERE id = ?", (new_id,)).fetchone():
+    try:
+        # events.hive_id follows a renamed id through ON UPDATE CASCADE.
+        db().execute(
+            "UPDATE hives SET id = %s, name = %s, lat = %s, lng = %s WHERE id = %s",
+            (new_id, clean(data, "name"), clean(data, "lat"), clean(data, "lng"), hive_id),
+        )
+        db().commit()
+    except UniqueViolation:
         abort(409, description="Ul o takim ID już istnieje")
-    db().execute(
-        "UPDATE hives SET id = ?, name = ?, lat = ?, lng = ? WHERE id = ?",
-        (new_id, clean(data, "name"), clean(data, "lat"), clean(data, "lng"), hive_id),
-    )
-    if new_id != hive_id:
-        db().execute("UPDATE events SET hive_id = ? WHERE hive_id = ?", (new_id, hive_id))
-    db().commit()
     return jsonify(hive_json(get_hive_or_404(new_id)))
 
 
 @app.delete("/api/hives/<hive_id>")
 def delete_hive(hive_id):
     get_hive_or_404(hive_id)
-    db().execute("DELETE FROM hives WHERE id = ?", (hive_id,))
+    db().execute("DELETE FROM hives WHERE id = %s", (hive_id,))
     db().commit()
     return "", 204
 
@@ -145,12 +158,12 @@ def delete_hive(hive_id):
 @app.get("/api/hives/<hive_id>/logs")
 def hive_logs(hive_id):
     get_hive_or_404(hive_id)
-    limit = min(request.args.get("limit", default=50, type=int), 500)
+    limit = max(1, min(request.args.get("limit", default=50, type=int), 500))
     rows = db().execute(
-        "SELECT alert, ts FROM events WHERE hive_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
+        "SELECT alert, ts FROM events WHERE hive_id = %s ORDER BY ts DESC, id DESC LIMIT %s",
         (hive_id, limit),
     ).fetchall()
-    return jsonify([{"alert": bool(r["alert"]), "ts": r["ts"]} for r in rows])
+    return jsonify([{"alert": r["alert"], "ts": iso(r["ts"])} for r in rows])
 
 
 @app.post("/api/hives/<hive_id>/events")
@@ -160,13 +173,12 @@ def add_event(hive_id):
     data = request.get_json(silent=True) or {}
     if not isinstance(data.get("alert"), bool):
         abort(400, description='Pole "alert" (boolean) jest wymagane')
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    db().execute(
-        "INSERT INTO events (hive_id, alert, ts) VALUES (?, ?, ?)",
-        (hive_id, int(data["alert"]), ts),
-    )
+    row = db().execute(
+        "INSERT INTO events (hive_id, alert) VALUES (%s, %s) RETURNING ts",
+        (hive_id, data["alert"]),
+    ).fetchone()
     db().commit()
-    return jsonify(alert=data["alert"], ts=ts), 201
+    return jsonify(alert=data["alert"], ts=iso(row["ts"])), 201
 
 
 if __name__ == "__main__":

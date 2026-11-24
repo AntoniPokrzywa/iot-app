@@ -16,6 +16,8 @@
     // An alert turns off by itself when no new alert event arrived for this long (0 = never).
     "ALERT_TTL_MINUTES": "5",
     // A hive is "offline" when neither an event nor a health ping arrived for this long.
-    "OFFLINE_AFTER_MINUTES": "30"
+    "OFFLINE_AFTER_MINUTES": "30",
+    // How often a node is expected to send a health ping (the app shows a countdown to the next one).
+    "HEARTBEAT_MINUTES": "5"
   }
 }

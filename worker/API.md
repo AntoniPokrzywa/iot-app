@@ -87,7 +87,8 @@ curl "https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/logs?limi
 curl https://vespaguard-api.vespa-guard.workers.dev/                          # backend health: {"status":"ok"}
 ```
 
-Hive fields: `alert` (latest event), `last` (time of latest event), `last_seen` (latest event OR heartbeat), `online` (last_seen within 30 min), `battery`, `rssi`.
+Hive fields: `alert` (latest event), `last` (time of latest event), `last_seen` (latest event OR heartbeat), `online` (last_seen within 30 min), `battery`, `rssi`, `heartbeat_interval` (seconds between expected health pings, currently 300).
+The app shows a countdown circle per hive: full and green right after a health ping, draining and turning orange then red until the next expected one (`last_seen` + `heartbeat_interval`). **Send health pings at that interval (every 5 min) so the circle refills on time.**
 
 ## Errors
 

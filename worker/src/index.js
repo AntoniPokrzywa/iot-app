@@ -69,6 +69,7 @@ function hiveJson(row, env) {
     last: row.ev_ts ?? null,
     last_seen: lastSeen,
     online: lastSeen !== null && now - Date.parse(lastSeen) <= offlineAfter,
+    heartbeat_interval: minutes(env.HEARTBEAT_MINUTES, 5) * 60, // seconds between expected health pings
     battery: row.battery ?? null,
     rssi: row.rssi ?? null,
   };

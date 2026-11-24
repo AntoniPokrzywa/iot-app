@@ -8,11 +8,44 @@ import { StatusBar } from 'expo-status-bar';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { Inter_400Regular, Inter_600SemiBold, Inter_700Bold, useFonts } from '@expo-google-fonts/inter';
 import { api } from './api';
-import { C, STATUS, ago, batteryIcon, fmtClock, fmtDate, rssiQuality, statusOf, theme } from './theme';
+import { C, STATUS, ago, batteryIcon, fmtClock, fmtDate, fmtMS, rssiQuality, signalState, statusOf, theme } from './theme';
 
-const POLL_MS = 15000;
+const POLL_MS = 5000;
+
+function useNow(ms = 1000) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
 
 // ---- small pieces ----------------------------------------------------------
+
+/**
+ * Countdown circle: full right after a health ping, then the "water" drains while the
+ * colour goes green -> orange -> red. Shows the time left to the next expected ping.
+ */
+function SignalGauge({ hive, now, size = 46 }) {
+  const sg = signalState(hive, now);
+  if (!sg) {
+    return (
+      <View style={[s.gauge, { width: size, height: size, borderRadius: size / 2, borderColor: C.line, backgroundColor: C.offBg }]}>
+        <Icon name="wifi-off" size={size * 0.42} color={C.off} />
+      </View>
+    );
+  }
+  const waterWeb = Platform.OS === 'web' ? { transitionProperty: 'height, background-color', transitionDuration: '1s', transitionTimingFunction: 'linear' } : null;
+  return (
+    <View style={[s.gauge, { width: size, height: size, borderRadius: size / 2, borderColor: sg.color, backgroundColor: C.surface }]}>
+      <View style={[s.water, { height: `${Math.round(sg.level * 100)}%`, backgroundColor: `${sg.color}59` }, waterWeb]} />
+      <Text style={[s.gaugeTxt, { fontSize: size * 0.27, color: sg.late ? C.alert : C.ink }]}>
+        {sg.late ? `+${fmtMS(sg.lateBy)}` : fmtMS(sg.remaining)}
+      </Text>
+    </View>
+  );
+}
 
 function PulseDot({ color }) {
   const v = useRef(new Animated.Value(0)).current;
@@ -49,7 +82,7 @@ function Pill({ status }) {
   return (
     <View style={[s.pill, { backgroundColor: st.bg }]}>
       {status === 'alert' ? <PulseDot color={st.fg} /> : <View style={[s.dot, { backgroundColor: st.fg }]} />}
-      <Text variant="labelMedium" style={{ color: st.fg }}>{st.label}</Text>
+      <Text variant="labelMedium" numberOfLines={1} style={{ color: st.fg }}>{st.label}</Text>
     </View>
   );
 }
@@ -158,7 +191,7 @@ function Summary({ hives }) {
   );
 }
 
-function HiveCard({ hive, onPress }) {
+function HiveCard({ hive, now, onPress }) {
   const status = statusOf(hive);
   const st = STATUS[status];
   const isAlert = status === 'alert';
@@ -173,11 +206,11 @@ function HiveCard({ hive, onPress }) {
           <View style={{ flex: 1, gap: 2 }}>
             <Text variant="titleMedium" numberOfLines={1}>{hive.name || hive.id}</Text>
             <Text variant="bodySmall" style={s.muted} numberOfLines={1}>
-              {hive.id} · {seen ? `sygnał ${seen}` : 'brak sygnału'}
+              {hive.id} · {seen ?? 'brak sygnału'}
             </Text>
             <View style={{ marginTop: 6 }}><Pill status={status} /></View>
           </View>
-          <Icon name="chevron-right" size={24} color={C.muted} />
+          <SignalGauge hive={hive} now={now} size={44} />
         </View>
       </TouchableRipple>
     </Surface>
@@ -199,6 +232,7 @@ function Empty({ onAdd }) {
 
 function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
   const insets = useSafeAreaInsets();
+  const now = useNow();
   return (
     <View style={{ flex: 1 }}>
       <ScrollView
@@ -213,7 +247,7 @@ function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
             <Summary hives={hives} />
             <Text variant="labelLarge" style={s.sectionLabel}>TWOJE ULE</Text>
             <View style={{ gap: 12 }}>
-              {hives.map((h) => <HiveCard key={h.id} hive={h} onPress={() => onOpen(h.id)} />)}
+              {hives.map((h) => <HiveCard key={h.id} hive={h} now={now} onPress={() => onOpen(h.id)} />)}
             </View>
           </>
         )}
@@ -317,9 +351,11 @@ function Details({ hive, onSave, onBack }) {
     try { await onSave(f); } catch (e) { setErr(e.message); setBusy(false); }
   };
 
+  const now = useNow();
   const status = statusOf(hive);
   const st = STATUS[status];
   const seen = ago(hive.last_seen);
+  const sg = signalState(hive, now);
 
   return (
     <View style={{ flex: 1 }}>
@@ -336,6 +372,19 @@ function Details({ hive, onSave, onBack }) {
             </Text>
           </View>
         </View>
+
+        <Surface style={s.timer} elevation={1}>
+          <SignalGauge hive={hive} now={now} size={76} />
+          <View style={{ flex: 1 }}>
+            <Text variant="labelLarge" style={s.muted}>HEALTHCHECK</Text>
+            <Text variant="titleMedium" style={{ color: sg ? (sg.late ? C.alert : C.ink) : C.muted }}>
+              {!sg ? 'Brak sygnału' : sg.late ? `Spóźniony o ${fmtMS(sg.lateBy)}` : `Następny za ${fmtMS(sg.remaining)}`}
+            </Text>
+            <Text variant="bodySmall" style={s.muted}>
+              {sg ? `Ostatni: ${seen} · co ${Math.round(sg.interval / 60)} min` : seen ? `Ostatni sygnał: ${seen}` : 'Czekamy na pierwszy sygnał'}
+            </Text>
+          </View>
+        </Surface>
 
         <View style={s.statRow}>
           <Stat icon={batteryIcon(hive.battery)} label="Bateria" value={hive.battery == null ? '—' : `${hive.battery}%`} />
@@ -500,6 +549,10 @@ const s = StyleSheet.create({
   hero: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, borderRadius: 20 },
   heroIcon: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
   statRow: { flexDirection: 'row', gap: 12, marginTop: 12 },
+  timer: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 12, padding: 16, borderRadius: 18, backgroundColor: C.surface },
+  gauge: { borderWidth: 3, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  water: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+  gaugeTxt: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
   stat: { flex: 1, borderRadius: 18, padding: 16, backgroundColor: C.surface },
 
   logPanel: { borderRadius: 18, backgroundColor: C.surface, overflow: 'hidden' },

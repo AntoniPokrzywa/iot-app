@@ -19,7 +19,7 @@ Hive nodes (IoT devices) report to this backend over plain HTTPS + JSON.
 | Report a detection | **immediately** when a hornet is detected | `POST /api/hives/{id}/events` with `{"alert": true}` |
 | Report all-clear | optional, e.g. when a detection ends | `POST /api/hives/{id}/events` with `{"alert": false}` |
 
-The app marks a hive **offline** if nothing (heartbeat or event) arrived for 30 minutes, so send the health ping every 5 minutes (or at least every few minutes).
+The app marks a hive **offline** if nothing (heartbeat or event) arrived for 10 minutes, so send the health ping every 5 minutes (or at least every few minutes).
 Heartbeats do NOT appear in the detection log; events do.
 
 ## Endpoints

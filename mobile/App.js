@@ -1,25 +1,40 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, SafeAreaView,
+  ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { api } from './api';
 
 const C = {
   yellow: '#EEC643', bg: '#FFF9E5', text: '#2B2412', muted: '#7A7260',
   green: '#2E7D4F', greenBg: '#E3F1E6', red: '#C62F3E', redBg: '#FBE3E6',
 };
 
-const INITIAL = [
-  { id: 'VG-0154', name: 'Ul przy sadzie', lat: '50.0640', lng: '19.9440', alert: false, last: '14:32' },
-  { id: 'VG-0157', name: 'Ul na łące', lat: '50.0647', lng: '19.9450', alert: true, last: '14:28' },
-  { id: 'VG-0155', name: 'Ul pod lasem', lat: '50.0650', lng: '19.9460', alert: false, last: '14:15' },
-  { id: 'VG-0156', name: 'Ul przy stawie', lat: '50.0655', lng: '19.9470', alert: false, last: '13:58' },
-];
+const POLL_MS = 15000;
 
-const LOGS = [
-  { alert: true, text: 'Wykryto szerszenia', time: '14:43' },
-  ...['14:40', '14:30', '14:20', '14:10', '14:00', '13:50'].map((t) => ({ alert: false, text: 'Ul bezpieczny', time: t })),
-];
+const pad = (n) => String(n).padStart(2, '0');
+
+// ISO timestamp -> "HH:MM" today, "DD.MM HH:MM" otherwise (device local time).
+function fmtTime(iso) {
+  if (!iso) return '--:--';
+  const d = new Date(iso);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return d.toDateString() === new Date().toDateString() ? hm : `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${hm}`;
+}
+
+function Message({ text, error, onRetry }) {
+  return (
+    <View style={{ padding: 24, alignItems: 'center' }}>
+      <Text style={{ color: error ? C.red : C.muted, textAlign: 'center' }}>{text}</Text>
+      {onRetry && (
+        <TouchableOpacity onPress={onRetry} style={[s.btn, { marginTop: 12, paddingHorizontal: 24 }]}>
+          <Text style={s.btnTxt}>Spróbuj ponownie</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
 
 function Header({ title, subtitle, onBack }) {
   return (
@@ -47,17 +62,23 @@ function Field({ label, hint, ...props }) {
   );
 }
 
-function List({ hives, onOpen, onAdd }) {
+function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
   return (
     <>
       <Header title="VespaGuard" subtitle="Ochrona Twoich uli przed szerszeniami" />
-      <ScrollView contentContainerStyle={{ padding: 16 }}>
+      <ScrollView
+        contentContainerStyle={{ padding: 16 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
         <Text style={s.section}>Twoje ule</Text>
-        {hives.map((h) => (
+        {hives === null && !error && <ActivityIndicator color={C.muted} style={{ marginTop: 24 }} />}
+        {error && <Message error text={error} onRetry={onRefresh} />}
+        {hives && hives.length === 0 && <Message text="Nie masz jeszcze żadnych uli. Dodaj pierwszy przyciskiem +." />}
+        {(hives || []).map((h) => (
           <TouchableOpacity key={h.id} style={s.card} onPress={() => onOpen(h.id)}>
             <View style={{ flex: 1 }}>
               <Text style={s.cardTitle}>{h.name || h.id}</Text>
-              <Text style={s.hint}>Ostatni sygnał: {h.last}</Text>
+              <Text style={s.hint}>Ostatni sygnał: {fmtTime(h.last)}</Text>
             </View>
             <View style={[s.badge, { backgroundColor: h.alert ? C.redBg : C.greenBg }]}>
               <Text style={{ color: h.alert ? C.red : C.green, fontSize: 11, fontWeight: '600' }}>
@@ -79,6 +100,14 @@ function List({ hives, onOpen, onAdd }) {
 
 function AddHive({ onSave, onCancel }) {
   const [f, setF] = useState({ id: '', lat: '', lng: '', name: '' });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const submit = async () => {
+    if (!f.id.trim() || busy) return;
+    setBusy(true);
+    setErr(null);
+    try { await onSave(f); } catch (e) { setErr(e.message); setBusy(false); }
+  };
   const set = (k) => (v) => setF({ ...f, [k]: v });
   return (
     <>
@@ -96,8 +125,9 @@ function AddHive({ onSave, onCancel }) {
           <Field label="Nazwa (opcjonalnie)" placeholder="np. Ul przy sadzie" hint="Będzie widoczna na liście uli." value={f.name} onChangeText={set('name')} />
         </View>
         <View style={{ flex: 1 }} />
-        <TouchableOpacity style={s.btn} onPress={() => f.id && onSave({ ...f, alert: false, last: '--:--' })}>
-          <Text style={s.btnTxt}>Dodaj ul</Text>
+        {err && <Text style={{ color: C.red, textAlign: 'center', marginBottom: 8 }}>{err}</Text>}
+        <TouchableOpacity style={[s.btn, busy && { opacity: 0.6 }]} onPress={submit} disabled={busy}>
+          <Text style={s.btnTxt}>{busy ? 'Dodawanie…' : 'Dodaj ul'}</Text>
         </TouchableOpacity>
         <TouchableOpacity onPress={onCancel} style={{ padding: 14, alignItems: 'center' }}>
           <Text style={{ color: C.muted, fontWeight: '600' }}>Anuluj</Text>
@@ -109,7 +139,27 @@ function AddHive({ onSave, onCancel }) {
 
 function Details({ hive, onSave, onBack }) {
   const [f, setF] = useState(hive);
+  const [logs, setLogs] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
   const set = (k) => (v) => setF({ ...f, [k]: v });
+
+  const loadLogs = useCallback(() => {
+    api.getLogs(hive.id).then((l) => { setLogs(l); setErr(null); }).catch((e) => setErr(e.message));
+  }, [hive.id]);
+  useEffect(() => {
+    loadLogs();
+    const t = setInterval(loadLogs, POLL_MS);
+    return () => clearInterval(t);
+  }, [loadLogs]);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try { await onSave(f); } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
   return (
     <>
       <Header title={hive.name || hive.id} subtitle={`ID: ${hive.id}`} onBack={onBack} />
@@ -123,19 +173,21 @@ function Details({ hive, onSave, onBack }) {
           <Field label="Szerokość" keyboardType="numeric" value={f.lat} onChangeText={set('lat')} />
           <Field label="Długość" keyboardType="numeric" value={f.lng} onChangeText={set('lng')} />
         </View>
-        <TouchableOpacity style={[s.btn, { marginTop: 12 }]} onPress={() => onSave(f)}>
-          <Text style={s.btnTxt}>Zapisz zmiany</Text>
+        <TouchableOpacity style={[s.btn, { marginTop: 12 }, busy && { opacity: 0.6 }]} onPress={submit} disabled={busy}>
+          <Text style={s.btnTxt}>{busy ? 'Zapisywanie…' : 'Zapisz zmiany'}</Text>
         </TouchableOpacity>
         <View style={s.logsHead}>
           <Text style={s.section}>Logi</Text>
-          <Text style={s.hint}>Dziś</Text>
         </View>
-        {LOGS.map((l, i) => (
+        {err && <Message error text={err} />}
+        {logs === null && !err && <ActivityIndicator color={C.muted} style={{ marginTop: 12 }} />}
+        {logs && logs.length === 0 && <Message text="Brak zdarzeń z tego ula." />}
+        {(logs || []).map((l, i) => (
           <View key={i} style={[s.log, l.alert && { backgroundColor: C.redBg }]}>
             <Text style={{ color: l.alert ? C.red : C.text, fontWeight: l.alert ? '700' : '500', fontSize: 12 }}>
-              <Text style={{ color: l.alert ? C.red : C.green }}>● </Text>{l.text}
+              <Text style={{ color: l.alert ? C.red : C.green }}>● </Text>{l.alert ? 'Wykryto szerszenia' : 'Ul bezpieczny'}
             </Text>
-            <Text style={{ color: l.alert ? C.red : C.text, fontWeight: '700', fontSize: 12 }}>{l.time}</Text>
+            <Text style={{ color: l.alert ? C.red : C.text, fontWeight: '700', fontSize: 12 }}>{fmtTime(l.ts)}</Text>
           </View>
         ))}
       </ScrollView>
@@ -144,25 +196,63 @@ function Details({ hive, onSave, onBack }) {
 }
 
 export default function App() {
-  const [hives, setHives] = useState(INITIAL);
+  const [hives, setHives] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [screen, setScreen] = useState({ name: 'list' });
+
+  const load = useCallback(async () => {
+    try {
+      setHives(await api.listHives());
+      setError(null);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, [load]);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, POLL_MS);
+    return () => clearInterval(t);
+  }, [load]);
+
   const home = () => setScreen({ name: 'list' });
 
   let body;
   if (screen.name === 'add') {
-    body = <AddHive onCancel={home} onSave={(h) => { setHives([...hives, h]); home(); }} />;
+    body = <AddHive onCancel={home} onSave={async (h) => { await api.createHive(h); await load(); home(); }} />;
   } else if (screen.name === 'details') {
-    const hive = hives.find((h) => h.id === screen.id);
-    body = (
+    const hive = (hives || []).find((h) => h.id === screen.id);
+    body = hive ? (
       <Details
         key={hive.id}
         hive={hive}
         onBack={home}
-        onSave={(u) => { setHives(hives.map((h) => (h.id === hive.id ? u : h))); home(); }}
+        onSave={async (u) => { await api.updateHive(hive.id, u); await load(); home(); }}
       />
+    ) : (
+      <>
+        <Header title="VespaGuard" onBack={home} />
+        <Message text="Nie znaleziono ula." />
+      </>
     );
   } else {
-    body = <List hives={hives} onOpen={(id) => setScreen({ name: 'details', id })} onAdd={() => setScreen({ name: 'add' })} />;
+    body = (
+      <List
+        hives={hives}
+        error={error}
+        refreshing={refreshing}
+        onRefresh={refresh}
+        onOpen={(id) => setScreen({ name: 'details', id })}
+        onAdd={() => setScreen({ name: 'add' })}
+      />
+    );
   }
 
   return (

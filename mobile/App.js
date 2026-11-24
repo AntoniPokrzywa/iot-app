@@ -4,23 +4,13 @@ import {
   ActivityIndicator, Button, FAB, IconButton, PaperProvider, Surface, Text, TextInput, TouchableRipple,
 } from 'react-native-paper';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle } from 'react-native-svg';
 import { StatusBar } from 'expo-status-bar';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { Inter_400Regular, Inter_600SemiBold, Inter_700Bold, useFonts } from '@expo-google-fonts/inter';
 import { api } from './api';
-import { C, STATUS, ago, batteryIcon, fmtClock, fmtDate, fmtMS, rssiQuality, signalState, statusOf, theme } from './theme';
+import { C, STATUS, ago, batteryIcon, fmtClock, fmtDate, rssiQuality, statusOf, theme } from './theme';
 
 const POLL_MS = 5000;
-
-function useNow(ms = 1000) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
-}
 
 // ---- small pieces ----------------------------------------------------------
 
@@ -40,45 +30,6 @@ function Pulse({ children, style }) {
   }, [v]);
   return <Animated.View style={[style, { opacity: v }]}>{children}</Animated.View>;
 }
-
-/**
- * Ring around its children that shows the signal: full and green right after a health
- * ping, draining and turning orange, then red until the next one is due. An alarm
- * overrides it with a pulsing red ring.
- */
-function SignalRing({ hive, now, size = 56, stroke = 4, alert = false, children }) {
-  const sg = signalState(hive, now);
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const level = alert ? 1 : sg ? sg.level : 0;
-  const color = alert ? C.alert : sg ? sg.color : C.line;
-  const ring = (
-    <Svg width={size} height={size} style={s.ringSvg}>
-      <Circle cx={size / 2} cy={size / 2} r={r} stroke={sg?.late ? C.alertLine : C.line} strokeWidth={stroke} fill="none" />
-      {level > 0.004 && (
-        <Circle
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          stroke={color}
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          fill="none"
-          strokeDasharray={`${c} ${c}`}
-          strokeDashoffset={c * (1 - level)}
-        />
-      )}
-    </Svg>
-  );
-  return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      {alert ? <Pulse style={StyleSheet.absoluteFill}>{ring}</Pulse> : ring}
-      {children}
-    </View>
-  );
-}
-
-const countdownText = (sg) => (sg.late ? `+${fmtMS(sg.lateBy)}` : fmtMS(sg.remaining));
 
 function Notice({ icon = 'alert-circle-outline', text, tone = 'alert', onRetry }) {
   const fg = tone === 'alert' ? C.alert : C.muted;
@@ -211,29 +162,26 @@ function Summary({ hives }) {
   );
 }
 
-function HiveCard({ hive, now, onPress }) {
+function HiveCard({ hive, onPress }) {
   const status = statusOf(hive);
   const st = STATUS[status];
   const isAlert = status === 'alert';
-  const sg = signalState(hive, now);
-  const seen = ago(hive.last_seen);
+  const seen = ago(hive.last_health);
   return (
     <Surface style={[s.card, isAlert && s.cardAlert]} elevation={0}>
       <TouchableRipple onPress={onPress} borderless style={s.cardTouch} rippleColor="rgba(0,0,0,0.06)">
         <View style={s.cardRow}>
-          <SignalRing hive={hive} now={now} size={56} alert={isAlert}>
+          <View style={[s.avatar, { backgroundColor: st.bg }]}>
             <Icon name={st.icon} size={24} color={st.fg} />
-          </SignalRing>
+          </View>
           <View style={{ flex: 1, gap: 1 }}>
             <Text variant="titleMedium" numberOfLines={1}>{hive.name || hive.id}</Text>
             <Text variant="labelLarge" style={{ color: st.fg }} numberOfLines={1}>{st.label}</Text>
-            <Text variant="bodySmall" style={s.muted} numberOfLines={1}>{hive.id} · {seen ?? 'brak sygnału'}</Text>
-          </View>
-          {sg && (
-            <Text variant="titleMedium" style={[s.countdown, { color: sg.late ? C.alert : sg.color }]}>
-              {countdownText(sg)}
+            <Text variant="bodySmall" style={s.muted} numberOfLines={1}>
+              {hive.id} · {seen ? `healthcheck ${seen}` : 'brak healthchecku'}
             </Text>
-          )}
+          </View>
+          <Icon name="chevron-right" size={22} color={C.muted} />
         </View>
       </TouchableRipple>
     </Surface>
@@ -255,7 +203,6 @@ function Empty({ onAdd }) {
 
 function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
   const insets = useSafeAreaInsets();
-  const now = useNow();
   const alerts = (hives || []).filter((h) => h.alert);
   return (
     <View style={{ flex: 1 }}>
@@ -271,7 +218,7 @@ function List({ hives, error, refreshing, onRefresh, onOpen, onAdd }) {
             {alerts.length > 0 ? <AlertHero alerts={alerts} onOpen={onOpen} /> : <Summary hives={hives} />}
             <Text variant="labelLarge" style={s.sectionLabel}>TWOJE ULE</Text>
             <View style={{ gap: 12 }}>
-              {hives.map((h) => <HiveCard key={h.id} hive={h} now={now} onPress={() => onOpen(h.id)} />)}
+              {hives.map((h) => <HiveCard key={h.id} hive={h} onPress={() => onOpen(h.id)} />)}
             </View>
           </>
         )}
@@ -377,33 +324,24 @@ function Details({ hive, onSave, onBack }) {
     try { await onSave(f); } catch (e) { setErr(e.message); setBusy(false); }
   };
 
-  const now = useNow();
   const status = statusOf(hive);
   const st = STATUS[status];
   const isAlert = status === 'alert';
-  const seen = ago(hive.last_seen);
-  const sg = signalState(hive, now);
+  const seen = ago(hive.last_health);
 
   return (
     <View style={{ flex: 1 }}>
       <TopBar title={hive.name || hive.id} subtitle={`ID: ${hive.id}`} onBack={onBack} />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
         <View style={[s.hero, { backgroundColor: st.bg }, isAlert && { borderColor: C.alertLine, borderWidth: 1 }]}>
-          <SignalRing hive={hive} now={now} size={92} stroke={7} alert={isAlert}>
-            {sg ? (
-              <Text variant="titleLarge" style={[s.heroCountdown, { color: sg.late ? C.alert : C.ink }]}>{countdownText(sg)}</Text>
-            ) : (
-              <Icon name={st.icon} size={32} color={st.fg} />
-            )}
-          </SignalRing>
+          <View style={[s.heroIcon, { backgroundColor: st.fg }]}>
+            <Icon name={st.icon} size={30} color="#fff" />
+          </View>
           <View style={{ flex: 1, gap: 2 }}>
             <Text variant="titleLarge" style={{ color: st.fg }}>{st.label}</Text>
             <Text variant="bodyMedium" style={{ color: C.ink }}>
-              {!sg
-                ? (seen ? `Ostatni sygnał: ${seen}` : 'Czekamy na pierwszy sygnał')
-                : sg.late ? `Spóźniony o ${fmtMS(sg.lateBy)}` : `Healthcheck za ${fmtMS(sg.remaining)}`}
+              {seen ? `Ostatni healthcheck: ${seen}` : 'Brak healthchecku od tego ula'}
             </Text>
-            {sg && <Text variant="bodySmall" style={s.muted}>Ostatni: {seen} · co {Math.round(sg.interval / 60)} min</Text>}
           </View>
         </View>
 
@@ -553,8 +491,7 @@ const s = StyleSheet.create({
   cardAlert: { backgroundColor: '#FFF5F6', borderColor: C.alertLine },
   cardTouch: { borderRadius: 20 },
   cardRow: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16 },
-  ringSvg: { position: 'absolute', transform: [{ rotate: '-90deg' }] },
-  countdown: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
+  avatar: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
 
   fab: { position: 'absolute', right: 20, borderRadius: 18 },
 
@@ -574,7 +511,7 @@ const s = StyleSheet.create({
   btnLabel: { fontFamily: 'Inter_600SemiBold', fontSize: 15, letterSpacing: 0 },
 
   hero: { flexDirection: 'row', alignItems: 'center', gap: 18, padding: 18, borderRadius: 22 },
-  heroCountdown: { fontFamily: 'Inter_700Bold', fontVariant: ['tabular-nums'] },
+  heroIcon: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
   statsPanel: { ...box, flexDirection: 'row', alignItems: 'center', borderRadius: 20, marginTop: 12, paddingVertical: 14 },
   stat: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16 },
   statDivider: { width: 1, alignSelf: 'stretch', backgroundColor: C.line },

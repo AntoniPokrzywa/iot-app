@@ -19,7 +19,7 @@ Hive nodes (IoT devices) report to this backend over plain HTTPS + JSON.
 | Report a detection | **immediately** when a hornet is detected | `POST /api/hives/{id}/events` with `{"alert": true}` |
 | Report all-clear | optional, e.g. when a detection ends | `POST /api/hives/{id}/events` with `{"alert": false}` |
 
-The app marks a hive **offline** if nothing (heartbeat or event) arrived for 30 minutes, so the heartbeat interval must be well under that.
+The app marks a hive **offline** if nothing (heartbeat or event) arrived for 30 minutes, so send the health ping every 5 minutes (or at least every few minutes).
 Heartbeats do NOT appear in the detection log; events do.
 
 ## Endpoints
@@ -87,8 +87,7 @@ curl "https://vespaguard-api.vespa-guard.workers.dev/api/hives/VG-0157/logs?limi
 curl https://vespaguard-api.vespa-guard.workers.dev/                          # backend health: {"status":"ok"}
 ```
 
-Hive fields: `alert` (latest event), `last` (time of latest event), `last_seen` (latest event OR heartbeat), `online` (last_seen within 30 min), `battery`, `rssi`, `heartbeat_interval` (seconds between expected health pings, currently 300).
-The app shows a countdown circle per hive: full and green right after a health ping, draining and turning orange then red until the next expected one (`last_seen` + `heartbeat_interval`). **Send health pings at that interval (every 5 min) so the circle refills on time.**
+Hive fields: `alert` (latest event, auto-expires 5 min after the last `alert:true`), `last` (time of latest event), `last_health` (time of latest health ping), `last_seen` (latest event OR health ping), `online` (`false` when nothing arrived for 10 min, shown as "Brak sygnału"), `battery`, `rssi`.
 
 ## Errors
 

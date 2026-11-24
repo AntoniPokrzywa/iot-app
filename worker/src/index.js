@@ -50,13 +50,14 @@ const HIVE_SELECT = `
 
 /**
  * alert     = latest event is an alert AND (if ALERT_TTL_MINUTES > 0) it is recent enough
- * last      = time of latest detection event
- * last_seen = latest sign of life (event or health ping); online = recent last_seen
+ * last        = time of latest detection event
+ * last_health = time of latest health ping
+ * last_seen   = latest sign of life (event or health ping); online = recent last_seen
  */
 function hiveJson(row, env) {
   const now = Date.now();
   const ttl = minutes(env.ALERT_TTL_MINUTES, 5) * 60_000;
-  const offlineAfter = minutes(env.OFFLINE_AFTER_MINUTES, 30) * 60_000;
+  const offlineAfter = minutes(env.OFFLINE_AFTER_MINUTES, 10) * 60_000;
   const seen = [row.ev_ts, row.hl_ts].filter(Boolean);
   const lastSeen = seen.length ? seen.reduce((a, b) => (a > b ? a : b)) : null; // same-format ISO strings sort chronologically
   const alert = row.ev_alert === 1 && (ttl === 0 || now - Date.parse(row.ev_ts) <= ttl);
@@ -69,7 +70,7 @@ function hiveJson(row, env) {
     last: row.ev_ts ?? null,
     last_seen: lastSeen,
     online: lastSeen !== null && now - Date.parse(lastSeen) <= offlineAfter,
-    heartbeat_interval: minutes(env.HEARTBEAT_MINUTES, 5) * 60, // seconds between expected health pings
+    last_health: row.hl_ts ?? null, // time of the latest health ping
     battery: row.battery ?? null,
     rssi: row.rssi ?? null,
   };

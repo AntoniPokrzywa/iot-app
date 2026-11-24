@@ -1,11 +1,13 @@
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, abort, g, jsonify, request
 from flask_cors import CORS
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "vespaguard.db"))
+# A hive counts as offline when nothing (event or health ping) arrived for this long.
+OFFLINE_AFTER = timedelta(minutes=int(os.environ.get("OFFLINE_AFTER_MINUTES", "30")))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hives (
@@ -16,11 +18,17 @@ CREATE TABLE IF NOT EXISTS hives (
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    hive_id TEXT NOT NULL REFERENCES hives(id) ON DELETE CASCADE,
+    hive_id TEXT NOT NULL REFERENCES hives(id) ON DELETE CASCADE ON UPDATE CASCADE,
     alert INTEGER NOT NULL,
     ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_hive_ts ON events (hive_id, ts DESC);
+CREATE TABLE IF NOT EXISTS health (
+    hive_id TEXT PRIMARY KEY REFERENCES hives(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    ts TEXT NOT NULL,
+    battery INTEGER,
+    rssi INTEGER
+);
 """
 
 app = Flask(__name__)
@@ -50,12 +58,28 @@ def init_db():
 init_db()
 
 
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_iso(ts):
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
 def hive_json(row):
-    """Hive plus its latest status. `last` is an ISO timestamp (UTC) or None."""
+    """Hive plus its latest status.
+
+    `last` = latest detection event; `last_seen` = latest sign of life (event or
+    health ping); `online` = last_seen is recent enough. All times are ISO UTC.
+    """
     latest = db().execute(
         "SELECT alert, ts FROM events WHERE hive_id = ? ORDER BY ts DESC, id DESC LIMIT 1",
         (row["id"],),
     ).fetchone()
+    health = db().execute("SELECT ts, battery, rssi FROM health WHERE hive_id = ?", (row["id"],)).fetchone()
+    seen = [x["ts"] for x in (latest, health) if x]
+    last_seen = max(seen) if seen else None  # ISO strings with the same format sort chronologically
+    online = bool(last_seen) and datetime.now(timezone.utc) - parse_iso(last_seen) <= OFFLINE_AFTER
     return {
         "id": row["id"],
         "name": row["name"],
@@ -63,6 +87,10 @@ def hive_json(row):
         "lng": row["lng"],
         "alert": bool(latest["alert"]) if latest else False,
         "last": latest["ts"] if latest else None,
+        "last_seen": last_seen,
+        "online": online,
+        "battery": health["battery"] if health else None,
+        "rssi": health["rssi"] if health else None,
     }
 
 
@@ -128,8 +156,6 @@ def update_hive(hive_id):
         "UPDATE hives SET id = ?, name = ?, lat = ?, lng = ? WHERE id = ?",
         (new_id, clean(data, "name"), clean(data, "lat"), clean(data, "lng"), hive_id),
     )
-    if new_id != hive_id:
-        db().execute("UPDATE events SET hive_id = ? WHERE hive_id = ?", (new_id, hive_id))
     db().commit()
     return jsonify(hive_json(get_hive_or_404(new_id)))
 
@@ -153,6 +179,29 @@ def hive_logs(hive_id):
     return jsonify([{"alert": bool(r["alert"]), "ts": r["ts"]} for r in rows])
 
 
+@app.post("/api/hives/<hive_id>/health")
+def add_health(hive_id):
+    """Heartbeat from the IoT device. Body is optional: {"battery": 0-100, "rssi": dBm}."""
+    get_hive_or_404(hive_id)
+    data = request.get_json(silent=True) or {}
+    values = {}
+    for key in ("battery", "rssi"):
+        v = data.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+            abort(400, description=f'Pole "{key}" musi być liczbą całkowitą')
+        values[key] = v
+    if values["battery"] is not None and not 0 <= values["battery"] <= 100:
+        abort(400, description='Pole "battery" musi być w zakresie 0-100')
+    ts = now_iso()
+    db().execute(
+        "INSERT INTO health (hive_id, ts, battery, rssi) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(hive_id) DO UPDATE SET ts = excluded.ts, battery = excluded.battery, rssi = excluded.rssi",
+        (hive_id, ts, values["battery"], values["rssi"]),
+    )
+    db().commit()
+    return jsonify(ts=ts, **values), 201
+
+
 @app.post("/api/hives/<hive_id>/events")
 def add_event(hive_id):
     """Called by the IoT device: {"alert": true|false}."""
@@ -160,7 +209,7 @@ def add_event(hive_id):
     data = request.get_json(silent=True) or {}
     if not isinstance(data.get("alert"), bool):
         abort(400, description='Pole "alert" (boolean) jest wymagane')
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    ts = now_iso()
     db().execute(
         "INSERT INTO events (hive_id, alert, ts) VALUES (?, ?, ?)",
         (hive_id, int(data["alert"]), ts),

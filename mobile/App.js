@@ -291,7 +291,7 @@ function LogRow({ log, last }) {
         <Icon name={alert ? 'alert' : 'check'} size={16} color={alert ? '#fff' : C.safe} />
       </View>
       <Text variant="bodyMedium" style={{ flex: 1, color: alert ? C.alert : C.ink, fontFamily: alert ? 'Inter_600SemiBold' : 'Inter_400Regular' }}>
-        {alert ? 'Wykryto szerszenia' : 'Ul bezpieczny'}
+        {alert ? 'Wykryto szerszenia' : 'UL bezpieczny'}
       </Text>
       <View style={{ alignItems: 'flex-end' }}>
         <Text variant="labelLarge" style={{ color: alert ? C.alert : C.ink }}>{fmtClock(log.ts)}</Text>

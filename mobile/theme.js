@@ -66,7 +66,7 @@ export const theme = {
 
 export const STATUS = {
   alert: { label: 'Wykryto szerszenia', icon: 'alert', fg: C.alert, bg: C.alertBg },
-  safe: { label: 'Ul bezpieczny', icon: 'shield-check', fg: C.safe, bg: C.safeBg },
+  safe: { label: 'UL bezpieczny', icon: 'shield-check', fg: C.safe, bg: C.safeBg },
   offline: { label: 'Brak sygnału', icon: 'wifi-off', fg: C.off, bg: C.offBg },
 };
 
